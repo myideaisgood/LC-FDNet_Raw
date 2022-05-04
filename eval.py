@@ -9,7 +9,7 @@ from utils.data_loaders import *
 from utils.log_helpers import *
 from utils.helpers import *
 
-def evaluate(args, logging, networks, test_dataloader, device, color_names, loc_names, flif_bpp, flif_avg_bpp, flif_avg_time, PRINT_INDIVIDUAL=True):
+def evaluate(args, logging, networks, test_dataloader, device, color_names, loc_names, flif_bpp_msb, flif_bpp_lsb, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time, PRINT_INDIVIDUAL=True):
 
     torch.cuda.empty_cache()
 
@@ -17,7 +17,9 @@ def evaluate(args, logging, networks, test_dataloader, device, color_names, loc_
         network_set(networks, color_names, loc_names, set='eval')
 
         bitrates = get_AverageMeter(color_names, loc_names)
-        bitrates['total'] = AverageMeter()
+        bitrates['total'] = {}
+        bitrates['total']['MSB'] = AverageMeter()
+        bitrates['total']['LSB'] = AverageMeter()
 
         enc_times = {}
         for loc in loc_names:
@@ -26,29 +28,36 @@ def evaluate(args, logging, networks, test_dataloader, device, color_names, loc_
         try:
             for batch_idx, data in enumerate(tqdm(test_dataloader)):
 
-                img_a, img_b, img_c, img_d, ori_img, img_name, padding = data
+                img_a_msb, img_b_msb, img_c_msb, img_d_msb, img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb, ori_img, img_name, padding = data
 
                 # Data to cuda
-                [img_a, img_b, img_c, img_d] = img2cuda([img_a, img_b, img_c, img_d], device)
-                imgs = abcd_unite(img_a, img_b, img_c, img_d, color_names)
+                [img_a_msb, img_b_msb, img_c_msb, img_d_msb] = img2cuda([img_a_msb, img_b_msb, img_c_msb, img_d_msb], device)
+                [img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb] = img2cuda([img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb], device)
+                imgs_msb = abcd_unite(img_a_msb, img_b_msb, img_c_msb, img_d_msb, color_names)
+                imgs_lsb = abcd_unite(img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb, color_names)
 
                 [_, _, H, W] = list(ori_img.shape)
 
                 # Inputs / Ref imgs / GTs
-                inputs = get_inputs(imgs, color_names, loc_names)
-                ref_imgs = get_refs(imgs, color_names)
-                gt_imgs = get_gts(imgs, color_names, loc_names)
+                inputs_msb = get_inputs(imgs_msb, color_names, loc_names)
+                ref_imgs_msb = get_refs(imgs_msb, color_names)
+                gt_imgs_msb = get_gts(imgs_msb, color_names, loc_names)
+
+                inputs_lsb = get_inputs(imgs_lsb, color_names, loc_names)
+                ref_imgs_lsb = get_refs(imgs_lsb, color_names)
+                gt_imgs_lsb = get_gts(imgs_lsb, color_names, loc_names)
 
                 for loc in loc_names:
 
                     start_time = time()
 
                     for color in color_names:
+                        # ==================================== MSB ====================================#
                         # Feed to network
-                        cur_network = networks[color][loc]
-                        cur_inputs = inputs[color][loc]
-                        cur_gt_img = gt_imgs[color][loc]
-                        cur_ref_img = ref_imgs[color]
+                        cur_network = networks[color][loc]['MSB']
+                        cur_inputs = inputs_msb[color][loc]
+                        cur_gt_img = gt_imgs_msb[color][loc]
+                        cur_ref_img = ref_imgs_msb[color]
 
                         # Low Frequency Compressor
                         _, q_res_L, _, _, mask_L, pmf_softmax_L = cur_network(cur_inputs, cur_gt_img, cur_ref_img, frequency='low', mode='eval')
@@ -71,11 +80,44 @@ def evaluate(args, logging, networks, test_dataloader, device, color_names, loc_
                         bitrate = bits / (H*W)
 
                         # Update holders
-                        bitrates[color][loc].update(bitrate)
+                        bitrates[color][loc]['MSB'].update(bitrate)
 
                         del q_res_H, pmf_softmax_H
                         torch.cuda.empty_cache()
                     
+                        # ==================================== LSB ====================================#
+                        # Feed to network
+                        cur_network = networks[color][loc]['LSB']
+                        cur_inputs = inputs_lsb[color][loc]
+                        cur_gt_img = gt_imgs_lsb[color][loc]
+                        cur_ref_img = ref_imgs_lsb[color]
+
+                        # Low Frequency Compressor
+                        _, q_res_L, _, _, mask_L, pmf_softmax_L = cur_network(cur_inputs, cur_gt_img, cur_ref_img, frequency='low', mode='eval')
+                        mask_H = 1-mask_L
+
+                        bits_L = estimate_bits(sym=q_res_L, pmf=pmf_softmax_L, mask=mask_L)
+
+                        del q_res_L, pmf_softmax_L
+                        torch.cuda.empty_cache()
+
+                        # High Frequency Compressor Input
+                        gt_L = mask_L * cur_gt_img
+                        input_H = torch.cat([cur_inputs, gt_L], dim=1)
+
+                        # High Frequency Compresor
+                        _, q_res_H, pmf_softmax_H = cur_network(input_H, cur_gt_img, cur_ref_img, frequency='high', mode='eval')
+                        bits_H = estimate_bits(sym=q_res_H, pmf=pmf_softmax_H, mask=mask_H)
+
+                        bits = bits_L.item() + bits_H.item()
+                        bitrate = bits / (H*W)
+
+                        # Update holders
+                        bitrates[color][loc]['LSB'].update(bitrate)
+
+                        del q_res_H, pmf_softmax_H
+                        torch.cuda.empty_cache()
+
                     enc_time = time() - start_time
                     enc_times[loc].update(enc_time)
                 
@@ -83,10 +125,11 @@ def evaluate(args, logging, networks, test_dataloader, device, color_names, loc_
                 
                 if PRINT_INDIVIDUAL:
                     # Print Test Img Results
-                    log_img_info(logging, img_name, bitrates, flif_bpp[batch_idx], color_names, loc_names)
+                    if batch_idx < 6:
+                        log_img_info(logging, img_name, bitrates, flif_bpp_msb[batch_idx], flif_bpp_lsb[batch_idx], color_names, loc_names)
             
             # Print Test Dataset Results
-            log_dataset_info(logging, bitrates, flif_avg_bpp, enc_times, flif_avg_time, color_names, loc_names)
+            log_dataset_info(logging, bitrates, flif_avg_bpp_msb, flif_avg_bpp_lsb, enc_times, flif_avg_time, color_names, loc_names)
         
         except Exception as ex:
             logging.info(ex)
@@ -131,7 +174,10 @@ if __name__ == '__main__':
 
     # Set up Dataset
     # Dataloader
-    test_dataset = Synthesized_Dataset(args, 'test')
+    if 'SIDD' in DATASET:
+        test_dataset = SIDD_Dataset(args, 'test')
+    elif 'mit' in DATASET:
+        test_dataset = MIT_Dataset(args, 'test')
 
     Collate_ = DivideCollate()
 
@@ -143,9 +189,8 @@ if __name__ == '__main__':
         collate_fn=Collate_
     )
 
-    # FLIF result of img a
-    flif_bpp, flif_avg_bpp, flif_avg_time = get_flif_result(test_dataloader)
-
+    # JPEG-flif result of img a
+    flif_bpp_msb, flif_bpp_lsb, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time = get_flif_result(test_dataloader)
 
     ############################
     # Encode : yd - ud - vd
@@ -174,7 +219,8 @@ if __name__ == '__main__':
         path_name = 'network_' + color + '_' + WEIGHTS
         checkpoint = torch.load(os.path.join(CKPT_DIR, path_name))
         for loc in loc_names:
-            networks[color][loc].load_state_dict(checkpoint['network_' + color + '_' + loc])
-    logging.info('Recover completed.')
+            networks[color][loc]['MSB'].load_state_dict(checkpoint['network_MSB' + color + '_' + loc])
+            networks[color][loc]['LSB'].load_state_dict(checkpoint['network_LSB' + color + '_' + loc])
+    logging.info('Recover complete')
 
-    bitrates, enc_times = evaluate(args, logging, networks, test_dataloader, device, color_names, loc_names, flif_bpp, flif_avg_bpp, flif_avg_time)
+    bitrates, enc_times = evaluate(args, logging, networks, test_dataloader, device, color_names, loc_names, flif_bpp_msb, flif_bpp_lsb, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time, True)

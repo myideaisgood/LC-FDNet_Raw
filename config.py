@@ -15,22 +15,22 @@ def parse_training_args(parser):
 
     # Session parameters
     parser.add_argument('--gpu_num', type=int, default=0, help='GPU number to use')
-    parser.add_argument('--batch_size', type=int, default=24, help='Minibatch size')
+    parser.add_argument('--batch_size', type=int, default=20, help='Minibatch size')
     parser.add_argument('--num_workers', type=int, default=4, help='Worker')
-    parser.add_argument('--epochs', type=int, default=20000, help='Number of epochs to train')
+    parser.add_argument('--epochs', type=int, default=4000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--decay_step', type=int, default=2000, help='Decay Step')
     parser.add_argument('--decay_rate', type=int, default=0.1, help='Decay Rate')
     parser.add_argument('--print_every', type=int, default=1, help='How many iterations print for loss evaluation')
-    parser.add_argument('--save_every', type=int, default=20, help='How many iterations to save')                        
-    parser.add_argument('--eval_every', type=int, default=20, help='How many iterations to save')                        
+    parser.add_argument('--save_every', type=int, default=1, help='How many iterations to save')                        
+    parser.add_argument('--eval_every', type=int, default=1, help='How many iterations to save')                        
     parser.add_argument('--do_eval', type=str2bool, default=True, help='How many iterations to save')                        
     parser.add_argument('--empty_cache', type=str2bool, default=True, help='Empty cache for efficient memory allocation (speed down)')
 
     # Directory parameters
     parser.add_argument('--data_dir', type=str, default="../DATASET/Compression", help='dataset directory')
-    parser.add_argument('--train_dataset', type=str, default="flickr/", help='name of dataset : play, clic_m, clic_p, div2k')
-    parser.add_argument('--test_dataset', type=str, default="Kodak/", help='name of dataset : play, clic_m, clic_p, div2k')
+    parser.add_argument('--train_dataset', type=str, default="mit16/", help='name of dataset : play, clic_m, clic_p, div2k')
+    parser.add_argument('--test_dataset', type=str, default="mit16/", help='name of dataset : play, clic_m, clic_p, div2k')
     parser.add_argument('--experiment_name', type=str, default='default/', help='Experiment Name directory')
     parser.add_argument('--ckpt_dir', type=str, default="ckpt/", help='checkpoint directory')
     parser.add_argument('--log_dir', type=str, default="log/", help='log directory')

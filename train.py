@@ -70,8 +70,15 @@ for key,value in sorted((args.__dict__).items()):
 ######### Configuration #########
 
 # Dataloader
-train_dataset = Synthesized_Dataset(args, 'train')
-test_dataset = Synthesized_Dataset(args, 'test')
+if 'SIDD' in TRAIN_DATASET:
+    train_dataset = SIDD_Dataset(args, 'train')
+elif 'mit' in TRAIN_DATASET:
+    train_dataset = MIT_Dataset(args, 'train')
+
+if 'SIDD' in TEST_DATASET:
+    test_dataset = SIDD_Dataset(args, 'test')
+elif 'mit' in TEST_DATASET:
+    test_dataset = MIT_Dataset(args, 'test')
 
 Collate_ = DivideCollate()
 
@@ -94,7 +101,7 @@ test_dataloader = DataLoader(
 
 # Get FLIF results
 if DO_EVAL:
-    flif_bpp, flif_avg_bpp, flif_avg_time = get_flif_result(test_dataloader)
+    flif_bpp_msb, flif_bpp_lsb, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time = get_flif_result(test_dataloader)
 
 ############################
 # Encode : yd - ud - vd
@@ -124,8 +131,11 @@ lf_ce = torch.nn.CrossEntropyLoss(reduction='mean')
 # Load the pretrained model if exists
 init_epoch = 0
 best_metrics = {}
-best_metrics['total'] = AverageMeter()
-best_metrics['total'].update(1000)
+best_metrics['total'] = {}
+best_metrics['total']['MSB'] = AverageMeter()
+best_metrics['total']['LSB'] = AverageMeter()
+best_metrics['total']['MSB'].update(1000)
+best_metrics['total']['LSB'].update(1000)
 
 if os.path.exists(os.path.join(CKPT_DIR, WEIGHTS)):
     logging.info('Recovering from %s ...' % os.path.join(CKPT_DIR, WEIGHTS))
@@ -138,7 +148,8 @@ if os.path.exists(os.path.join(CKPT_DIR, WEIGHTS)):
         path_name = 'network_' + color + '_' + WEIGHTS
         checkpoint = torch.load(os.path.join(CKPT_DIR, path_name))
         for loc in loc_names:
-            networks[color][loc].load_state_dict(checkpoint['network_' + color + '_' + loc])
+            networks[color][loc]['MSB'].load_state_dict(checkpoint['network_MSB' + color + '_' + loc])
+            networks[color][loc]['LSB'].load_state_dict(checkpoint['network_LSB' + color + '_' + loc])
     logging.info('Recover completed. Current epoch = #%d' % (init_epoch))
 
 # Create Optimizer / Scheduler
@@ -170,7 +181,9 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
 
     total_bitrates = {}
     for color in color_names:
-        total_bitrates[color] = AverageMeter()
+        total_bitrates[color] = {}
+        total_bitrates[color]['MSB'] = AverageMeter()
+        total_bitrates[color]['LSB'] = AverageMeter()
 
     # Network to train mode
     network_set(networks, color_names, loc_names, set='train')
@@ -178,25 +191,32 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
     # Train for batches
     for batch_idx, data in enumerate(tqdm(train_dataloader)):
                     
-        img_a, img_b, img_c, img_d, ori_img, _, _ = data
+        img_a_msb, img_b_msb, img_c_msb, img_d_msb, img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb, ori_img, _, _ = data
 
         # Data to cuda
-        [img_a, img_b, img_c, img_d] = img2cuda([img_a, img_b, img_c, img_d], device)
-        imgs = abcd_unite(img_a, img_b, img_c, img_d, color_names)
+        [img_a_msb, img_b_msb, img_c_msb, img_d_msb] = img2cuda([img_a_msb, img_b_msb, img_c_msb, img_d_msb], device)
+        [img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb] = img2cuda([img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb], device)
+        imgs_msb = abcd_unite(img_a_msb, img_b_msb, img_c_msb, img_d_msb, color_names)
+        imgs_lsb = abcd_unite(img_a_lsb, img_b_lsb, img_c_lsb, img_d_lsb, color_names)
 
         # Inputs / Ref imgs / GTs
-        inputs = get_inputs(imgs, color_names, loc_names)
-        ref_imgs = get_refs(imgs, color_names)
-        gt_imgs = get_gts(imgs, color_names, loc_names)
+        inputs_msb = get_inputs(imgs_msb, color_names, loc_names)
+        ref_imgs_msb = get_refs(imgs_msb, color_names)
+        gt_imgs_msb = get_gts(imgs_msb, color_names, loc_names)
+
+        inputs_lsb = get_inputs(imgs_lsb, color_names, loc_names)
+        ref_imgs_lsb = get_refs(imgs_lsb, color_names)
+        gt_imgs_lsb = get_gts(imgs_lsb, color_names, loc_names)
 
         for loc in loc_names:
             for color in color_names:
+                # ==================================== MSB ====================================#
                 # Feed to network
-                cur_network = networks[color][loc]
-                cur_inputs = inputs[color][loc]
-                cur_gt_img = gt_imgs[color][loc]
-                cur_ref_img = ref_imgs[color]
-                cur_optimizer = optimizers[color][loc]
+                cur_network = networks[color][loc]['MSB']
+                cur_inputs = inputs_msb[color][loc]
+                cur_gt_img = gt_imgs_msb[color][loc]
+                cur_ref_img = ref_imgs_msb[color]
+                cur_optimizer = optimizers[color][loc]['MSB']
 
                 # Low Frequency Compressor
                 pred_L, q_res_L, error_var_map, error_var_th, mask_L, pmf_logit_L = cur_network(cur_inputs, cur_gt_img, cur_ref_img, frequency='low', mode='train')
@@ -247,10 +267,71 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
                 loss = loss.item()
 
                 # Update holders
-                losses[color][loc].update(loss)
-                bitrates[color][loc].update(bitrate)
-                total_bitrates[color].update(bitrate)
+                losses[color][loc]['MSB'].update(loss)
+                bitrates[color][loc]['MSB'].update(bitrate)
+                total_bitrates[color]['MSB'].update(bitrate)
 
+
+                # ==================================== LSB ====================================#
+                # Feed to network
+                cur_network = networks[color][loc]['LSB']
+                cur_inputs = inputs_lsb[color][loc]
+                cur_gt_img = gt_imgs_lsb[color][loc]
+                cur_ref_img = ref_imgs_lsb[color]
+                cur_optimizer = optimizers[color][loc]['LSB']
+
+                # Low Frequency Compressor
+                pred_L, q_res_L, error_var_map, error_var_th, mask_L, pmf_logit_L = cur_network(cur_inputs, cur_gt_img, cur_ref_img, frequency='low', mode='train')
+                mask_H = 1-mask_L
+
+                # High Frequency Compressor Input
+                gt_L = mask_L * cur_gt_img
+                input_H = torch.cat([cur_inputs, gt_L], dim=1)
+
+                # High Frequency Compresor
+                pred_H, q_res_H, pmf_logit_H = cur_network(input_H, cur_gt_img, cur_ref_img, frequency='high', mode='train')
+
+                # Prediction Loss
+                pred_L_loss = lf_L1(mask_L*cur_gt_img, mask_L*pred_L)
+                pred_H_loss = lf_L1(mask_H*cur_gt_img, mask_H*pred_H)
+
+                pred_loss = pred_L_loss + pred_H_loss
+                pred_loss *= LAMBDA_PRED
+
+                # Bitrate Loss
+                pmf_logit_L = pmf_logit_L * mask_L + constant[color] * mask_H
+                pmf_logit_H = pmf_logit_H * mask_H + constant[color] * mask_L
+                q_res_L = q_res_L * mask_L
+                q_res_H = q_res_H * mask_H
+
+                br_L_loss = lf_ce(pmf_logit_L, q_res_L.squeeze(1))
+                br_H_loss = lf_ce(pmf_logit_H, q_res_H.squeeze(1))
+                br_loss = br_L_loss + br_H_loss
+                br_loss *= LAMBDA_BR
+
+                bits_L = estimate_bits(sym=q_res_L, pmf=torch.nn.Softmax(dim=1)(pmf_logit_L), mask=mask_L)
+                bits_H = estimate_bits(sym=q_res_H, pmf=torch.nn.Softmax(dim=1)(pmf_logit_H), mask=mask_H)
+                bits = bits_L.item() + bits_H.item()
+                bitrate = bits / (4*CROP_SIZE*CROP_SIZE)
+
+                # Error Variance Loss
+                ev_loss = lf_L1(error_var_map, torch.abs(cur_gt_img - pred_L))
+                ev_loss *= LAMBDA_EV
+
+                # Total Loss
+                loss = pred_loss + br_loss + ev_loss
+
+                # Optimize
+                cur_optimizer.zero_grad()
+                loss.backward()
+                cur_optimizer.step()
+
+                loss = loss.item()
+
+                # Update holders
+                losses[color][loc]['LSB'].update(loss)
+                bitrates[color][loc]['LSB'].update(bitrate)
+                total_bitrates[color]['LSB'].update(bitrate)
     # Step scheduler
     schedulers_step(schedulers, color_names, loc_names)
 
@@ -267,15 +348,15 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
         else:
             PRINT_INDIVIDUAL = False
 
-        bitrates, enc_times = evaluate(args, logging, networks, test_dataloader, device, color_names, loc_names, flif_bpp, flif_avg_bpp, flif_avg_time, PRINT_INDIVIDUAL)
+        bitrates, enc_times = evaluate(args, logging, networks, test_dataloader, device, color_names, loc_names, flif_bpp_msb, flif_bpp_lsb, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time, PRINT_INDIVIDUAL)
 
-        if bitrates['total'].avg() <= best_metrics['total'].avg():
+        if bitrates['total']['MSB'].avg() + bitrates['total']['LSB'].avg() <= best_metrics['total']['MSB'].avg() + best_metrics['total']['LSB'].avg():
             output_path = os.path.join(CKPT_DIR, WEIGHTS)
             best_metrics = bitrates
 
             torch.save({
                 'epoch_idx': epoch_idx,
-                'lr' : optimizers['Y']['d'].param_groups[0]["lr"],
+                'lr' : optimizers['Y']['d']['MSB'].param_groups[0]["lr"],
                 'best_metrics' : best_metrics
             }, output_path)
 
@@ -283,16 +364,18 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
                 path_name = 'network_' + color + '_' + WEIGHTS
                 output_path = os.path.join(CKPT_DIR, path_name)
                 torch.save({
-                    'network_' + color + '_d': networks[color]['d'].state_dict(),
-                    'network_' + color + '_b': networks[color]['b'].state_dict(),
-                    'network_' + color + '_c': networks[color]['c'].state_dict()
+                    'network_MSB' + color + '_d': networks[color]['d']['MSB'].state_dict(),
+                    'network_MSB' + color + '_b': networks[color]['b']['MSB'].state_dict(),
+                    'network_MSB' + color + '_c': networks[color]['c']['MSB'].state_dict(),
+                    'network_LSB' + color + '_d': networks[color]['d']['LSB'].state_dict(),
+                    'network_LSB' + color + '_b': networks[color]['b']['LSB'].state_dict(),
+                    'network_LSB' + color + '_c': networks[color]['c']['LSB'].state_dict()                  
                 }, output_path)
 
             logging.info('Saved checkpoint to %s ...' % output_path)
 
         # Print Best Test Dataset Results
-        log_dataset_info(logging, best_metrics, flif_avg_bpp, enc_times, flif_avg_time, color_names, loc_names, 'Best')
-
+        log_dataset_info(logging, best_metrics, flif_avg_bpp_msb, flif_avg_bpp_lsb, enc_times, flif_avg_time, color_names, loc_names, 'Best')
 
     if not DO_EVAL and (epoch_idx % SAVE_EVERY == 0):
 
@@ -300,7 +383,7 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
 
         torch.save({
             'epoch_idx': epoch_idx,
-            'lr' : optimizers['Y']['d'].param_groups[0]["lr"],
+            'lr' : optimizers['Y']['d']['MSB'].param_groups[0]["lr"],
             'best_metrics' : best_metrics
         }, output_path)
 
@@ -308,9 +391,12 @@ for epoch_idx in range(init_epoch+1, N_EPOCHS):
             path_name = 'network_' + color + '_' + WEIGHTS
             output_path = os.path.join(CKPT_DIR, path_name)
             torch.save({
-                'network_' + color + '_d': networks[color]['d'].state_dict(),
-                'network_' + color + '_b': networks[color]['b'].state_dict(),
-                'network_' + color + '_c': networks[color]['c'].state_dict()
+                'network_MSB' + color + '_d': networks[color]['d']['MSB'].state_dict(),
+                'network_MSB' + color + '_b': networks[color]['b']['MSB'].state_dict(),
+                'network_MSB' + color + '_c': networks[color]['c']['MSB'].state_dict(),
+                'network_LSB' + color + '_d': networks[color]['d']['LSB'].state_dict(),
+                'network_LSB' + color + '_b': networks[color]['b']['LSB'].state_dict(),
+                'network_LSB' + color + '_c': networks[color]['c']['LSB'].state_dict() 
             }, output_path)
 
         logging.info('Saved checkpoint to %s ...' % output_path)

@@ -51,8 +51,10 @@ def setup_networks(color_names, loc_names, logging, HIDDEN_UNIT):
 
     for loc in loc_names:
         for color in color_names:
-            networks[color][loc] = FDNet(color=color, indim=idx+1, hu=HIDDEN_UNIT)
-            logging.info('Parameters in Network %s %s : %d.' % (color, loc, count_parameters(networks[color][loc])))
+            networks[color][loc] = {}
+            networks[color][loc]['MSB'] = FDNet(color=color, indim=idx+1, hu=HIDDEN_UNIT)
+            networks[color][loc]['LSB'] = FDNet(color=color, indim=idx+1, hu=HIDDEN_UNIT)
+            logging.info('Parameters in Network %s %s : %d.' % (color, loc, count_parameters(networks[color][loc]['MSB'])))
             idx += 1
     return networks
 
@@ -63,7 +65,9 @@ def setup_optimizers(networks, color_names, loc_names, LR):
     for color in color_names:
         optimizer_color = {}
         for loc in loc_names:
-            optimizer_color[loc] = torch.optim.Adam(filter(lambda p: p.requires_grad, networks[color][loc].parameters()), lr=LR)
+            optimizer_color[loc] = {}
+            optimizer_color[loc]['MSB'] = torch.optim.Adam(filter(lambda p: p.requires_grad, networks[color][loc]['MSB'].parameters()), lr=LR)
+            optimizer_color[loc]['LSB'] = torch.optim.Adam(filter(lambda p: p.requires_grad, networks[color][loc]['LSB'].parameters()), lr=LR)
         optimizers[color] = optimizer_color    
 
     return optimizers
@@ -74,7 +78,9 @@ def setup_schedulers(optimizers, color_names, loc_names, DECAY_STEP, DECAY_RATE)
     for color in color_names:
         scheduler_color = {}
         for loc in loc_names:
-            scheduler_color[loc] = torch.optim.lr_scheduler.StepLR(optimizers[color][loc], step_size=DECAY_STEP, gamma=DECAY_RATE)
+            scheduler_color[loc] = {}
+            scheduler_color[loc]['MSB'] = torch.optim.lr_scheduler.StepLR(optimizers[color][loc]['MSB'], step_size=DECAY_STEP, gamma=DECAY_RATE)
+            scheduler_color[loc]['LSB'] = torch.optim.lr_scheduler.StepLR(optimizers[color][loc]['LSB'], step_size=DECAY_STEP, gamma=DECAY_RATE)
         schedulers[color] = scheduler_color
 
     return schedulers
@@ -83,22 +89,26 @@ def schedulers_step(schedulers, color_names, loc_names):
 
     for color in color_names:
         for loc in loc_names:
-            schedulers[color][loc].step()
+            schedulers[color][loc]['MSB'].step()
+            schedulers[color][loc]['LSB'].step()
 
 def network_set(networks, color_names, loc_names, set='train'):
 
     for color in color_names:
         for loc in loc_names:
             if set=='train':
-                networks[color][loc].train()
+                networks[color][loc]['MSB'].train()
+                networks[color][loc]['LSB'].train()
             else:
-                networks[color][loc].eval()
+                networks[color][loc]['MSB'].eval()
+                networks[color][loc]['LSB'].eval()
 
 def network2cuda(networks, device, color_names, loc_names):
 
     for color in color_names:
         for loc in loc_names:
-            networks[color][loc].to(device)
+            networks[color][loc]['MSB'].to(device)
+            networks[color][loc]['LSB'].to(device)
 
 
 def img2cuda(imgs, device):
@@ -115,7 +125,9 @@ def get_AverageMeter(color_names, loc_names):
     for color in color_names:
         input_color = {}
         for loc in loc_names:
-            input_color[loc] = AverageMeter()
+            input_color[loc] = {}
+            input_color[loc]['MSB'] = AverageMeter()
+            input_color[loc]['LSB'] = AverageMeter()
         input[color] = input_color
     
     return input  
@@ -206,14 +218,19 @@ def get_gts(imgs, color_names, loc_names):
 
 def update_total(bitrates, color_names, loc_names):
 
-    total_bit = 0
+    total_bit_msb = 0
+    total_bit_lsb = 0
     for color in color_names:
-        color_bit = 0
+        color_bit_msb = 0
+        color_bit_lsb = 0
         for loc in loc_names:
-            color_bit += bitrates[color][loc].val()
-        total_bit += color_bit
+            color_bit_msb += bitrates[color][loc]['MSB'].val()
+            color_bit_lsb += bitrates[color][loc]['LSB'].val()
+        total_bit_msb += color_bit_msb
+        total_bit_lsb += color_bit_lsb
 
-    bitrates['total'].update(total_bit)
+    bitrates['total']['MSB'].update(total_bit_msb)
+    bitrates['total']['LSB'].update(total_bit_lsb)
 
 def estimate_bits(sym, pmf, mask):
 
@@ -315,46 +332,60 @@ def slice_img(img):
 
     return slice_img    
 
+def do_flif(img_a, img_name, flif_avg_bpp, flif_avg_time, flif_bpp):
+
+    img_a = img_a[0].permute(1,2,0).numpy()
+    img_a = YUVD2RAW(img_a)
+    img_a = img_a.astype(np.uint8)
+    h, w = img_a.shape
+
+    savename = img_name[0]
+
+    cv2.imwrite(savename, img_a)
+
+    start = time()
+    os.system('flif -e -Q100 "%s" output.flif' % (savename))
+    end = time()
+
+    filesize = os.stat('output.flif').st_size
+
+    bpp = 8*filesize / (4*h*w)
+    flif_avg_bpp += bpp
+    flif_avg_time += (end - start)
+
+    flif_bpp.append(bpp)
+
+    os.system('rm "%s"' % (savename))
+    os.system('rm %s' % ('output.flif'))
+
+    return flif_avg_bpp, flif_avg_time, flif_bpp, bpp
+
+
 def get_flif_result(test_dataloader):
 
     # JPEG-XL result of img a
-    flif_bpp = []
-    flif_avg_bpp = 0.0
+    flif_bpp_msb, flif_bpp_lsb = [], []
+    flif_avg_bpp_msb, flif_avg_bpp_lsb = 0.0, 0.0
     flif_avg_time = 0.0
 
     for batch_idx, data in enumerate(test_dataloader):
         
-        img_a, _, _, _, ori_img, img_name, _ = data
+        img_a_msb, _, _, _, img_a_lsb, _, _, _, _, img_name, _ = data
 
-        img_a = img_a[0].permute(1,2,0).numpy()
-        img_a = YUVD2RAW(img_a)
-        img_a = img_a.astype(np.uint8)
-        h, w = img_a.shape
+        flif_avg_bpp_msb, flif_avg_time, flif_bpp_msb, bpp_msb = do_flif(img_a_msb, img_name, flif_avg_bpp_msb, flif_avg_time, flif_bpp_msb)
+        flif_avg_bpp_lsb, flif_avg_time, flif_bpp_lsb, bpp_lsb = do_flif(img_a_lsb, img_name, flif_avg_bpp_lsb, flif_avg_time, flif_bpp_lsb)
 
-        savename = img_name[0]
+        bpp = bpp_msb + bpp_lsb
 
-        cv2.imwrite(savename, img_a)
+        logging.info("%s : %.4f = %.4f + %.4f" % (img_name[0], bpp, bpp_msb, bpp_lsb))
 
-        start = time()
-        os.system('flif -e -Q100 "%s" output.flif' % (savename))
-        end = time()
 
-        filesize = os.stat('output.flif').st_size
-
-        bpp = 8*filesize / (4*h*w)
-        flif_avg_bpp += bpp
-        flif_avg_time += (end - start)
-
-        flif_bpp.append(bpp)
-
-        logging.info("%s : %.4f" % (img_name, bpp))
-
-        os.system('rm "%s"' % (savename))
-        os.system('rm %s' % ('output.flif'))
-
-    flif_avg_bpp /= len(test_dataloader)
+    flif_avg_bpp_msb /= len(test_dataloader)
+    flif_avg_bpp_lsb /= len(test_dataloader)
     flif_avg_time /= len(test_dataloader)
 
-    logging.info("FLIF Average BPP : %.4f,      Average Time : %.4f" % (flif_avg_bpp, flif_avg_time))    
+    flif_avg_bpp = flif_avg_bpp_msb + flif_avg_bpp_lsb
 
-    return flif_bpp, flif_avg_bpp, flif_avg_time
+    logging.info("flif Average BPP : %.4f = %.4f + %.4f,      Average Time : %.4f" % (flif_avg_bpp, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time))    
+
+    return flif_bpp_msb, flif_bpp_lsb, flif_avg_bpp_msb, flif_avg_bpp_lsb, flif_avg_time

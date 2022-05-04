@@ -25,7 +25,7 @@ EMPTY_CACHE = args.empty_cache
 
 # Directory Parameters
 DATA_DIR = args.data_dir
-DATASET = args.test_dataset
+DATASET = args.dataset
 EXP_NAME = args.experiment_name
 EXP_DIR = 'experiments/' + EXP_NAME
 CKPT_DIR = os.path.join(EXP_DIR, args.ckpt_dir)
@@ -51,7 +51,7 @@ for key,value in sorted((args.__dict__).items()):
 ######### Configuration #########
 ######### Configuration #########
 
-color_names = ['Y','U','V','D']
+color_names = ['Y','U','V']
 loc_names = ['d', 'b', 'c']
 
 # Set up networks
@@ -84,7 +84,7 @@ else:
 # Inference Current Model
 # Metric Holders
 dec_times = AverageMeter()
-dec_flif_time = AverageMeter()
+dec_jpegxl_time = AverageMeter()
 
 # Change networks to evaluation mode
 network_set(networks, color_names, loc_names, set='eval')
@@ -93,9 +93,9 @@ network_set(networks, color_names, loc_names, set='eval')
 img_names = os.listdir(os.path.join(DATA_DIR, DATASET, 'test'))
 img_names = sorted(img_names)
 
-# FLIF metrics
-flif_avg_bpp = 0
-flif_avg_time = 0
+# JPEGXL metrics
+jpegxl_avg_bpp = 0
+jpegxl_avg_time = 0
 
 from utils.enc_dec import *
 
@@ -105,9 +105,9 @@ with torch.no_grad():
         start_time = time()
 
         img_name = modify_imgname(img_name)
-        img_a = decode_flif(ENC_DIR, img_name)
+        img_a = decode_jpegxl(ENC_DIR, img_name)
 
-        flif_time = time()
+        jpegxl_time = time()
 
         img_a = var_or_cuda(torch.unsqueeze(img_a, dim=0))
         _, _, H, W = img_a.shape
@@ -157,7 +157,7 @@ with torch.no_grad():
 
         output_img = abcd2img(imgs, color_names)
 
-        H, W = output_img.shape
+        H, W, _ = output_img.shape
         output_img = output_img[:H-pad_h,:W-pad_w]
 
         cv2.imwrite(DEC_DIR + '/' + img_name + '.png', output_img)
@@ -165,12 +165,12 @@ with torch.no_grad():
         end_time = time()
 
         out_string = '%s, Decode Time = %.4f = %.4f + %.4f'
-        out_tuple = (img_name, end_time - start_time, flif_time - start_time, end_time - flif_time)
+        out_tuple = (img_name, end_time - start_time, jpegxl_time - start_time, end_time - jpegxl_time)
 
         logging.info(out_string % out_tuple)
 
-        dec_times.update(end_time - flif_time)
-        dec_flif_time.update(flif_time - start_time)
+        dec_times.update(end_time - jpegxl_time)
+        dec_jpegxl_time.update(jpegxl_time - start_time)
 
     out_string = 'Average Decode Time = %.4f = %.4f + %.4f'
-    out_tuple = (dec_times.avg() + dec_flif_time.avg(), dec_flif_time.avg() + dec_times.avg())        
+    out_tuple = (dec_times.avg() + dec_jpegxl_time.avg(), dec_jpegxl_time.avg() + dec_times.avg())        

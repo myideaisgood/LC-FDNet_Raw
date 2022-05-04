@@ -16,12 +16,6 @@ def doCFA(img):
 
     return raw_rgb_img
 
-def Raw2RGGB(img):
-
-
-
-    return img
-
 def RAW2YUVD(img):
 
     img = img.astype(np.float32)
@@ -113,7 +107,7 @@ def YUV2RGB(img):
 
     rgb_img = np.concatenate([r,g,b], axis=2)
 
-    return (rgb_img).astype(np.uint8)
+    return (rgb_img).astype(np.uint16)
 
 def pad_img(img):
 
